@@ -2,16 +2,17 @@
 name: CI
 
 on:
-  push:
-    branches: [ "main", "v*" ]
-  pull_request:
-    branches: [ "main", "v*" ]
   workflow_dispatch:
     inputs:
       tag:
         description: tag to build
         required: false
         type: string
+      test-filter:
+        description: optional unittest test names to run instead of the full tox suite
+        required: false
+        type: string
+        default: ""
   workflow_call:
     inputs:
       tag:
@@ -29,6 +30,7 @@ jobs:
   tests:
     name: "Python ${{ matrix.python-version }}"
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -57,11 +59,29 @@ jobs:
       - name: "Install tox dependencies"
         run: python -m pip install --upgrade tox tox-gh-actions
       - name: "Run tox for ${{ matrix.python-version }}"
-        run: "python -m tox"
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            python -m pip install .
+            python -Werror -m unittest -v ${{ inputs.test-filter }}
+          else
+            python -m tox
+          fi
+      - name: "Verbose unittest run (names every test, incl. skips and their reasons)"
+        if: ${{ !inputs.test-filter }}
+        run: |
+          python -m pip install .
+          python -Werror -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/unittest-verbose.log"
+      - name: "Summary: skipped tests with reasons"
+        if: ${{ !inputs.test-filter }}
+        run: |
+          echo "Skipped tests on ${{ matrix.python-version }} (name ... skipped 'reason'):"
+          awk '/\.\.\. skipped/' "$RUNNER_TEMP/unittest-verbose.log"
+          awk '/^Ran [0-9]+ tests|^OK|^FAILED/' "$RUNNER_TEMP/unittest-verbose.log"
 
   sdist:
     name: "Build sdist and wheel"
     runs-on: "ubuntu-latest"
+    timeout-minutes: 40
     needs: tests
     steps:
       - uses: "actions/checkout@v4"
@@ -75,7 +95,11 @@ jobs:
         run: python -m pip install --upgrade pip
       - name: "Install 'build'"
         run: python -m pip install --upgrade build
+      - name: "Pin setuptools to the release-era backend (setuptools 83.0.0)"
+        run: echo "setuptools==83.0.0" > "$RUNNER_TEMP/build-constraints.txt"
       - name: "Run 'build'"
+        env:
+          PIP_CONSTRAINT: ${{ runner.temp }}/build-constraints.txt
         run: "python -m build"
       - name: "Upload sdist artifact"
         uses: actions/upload-artifact@v4
